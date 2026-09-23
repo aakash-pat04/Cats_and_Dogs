@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+results/cache/
+results/chunks/
+results/split_cache.json
+results/split_cache.config.json
