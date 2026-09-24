@@ -3,6 +3,9 @@ __pycache__/
 *.pyc
 .DS_Store
 results/cache/
-results/chunks/
+results/chunks/_stale/
 results/split_cache.json
 results/split_cache.config.json
+results/sweep_results.csv
+results/final_report.json
+results/*.png
