@@ -69,6 +69,13 @@ CLASSIFIER_BUILDERS = {
         n_estimators=100, max_depth=10, min_samples_leaf=5, random_state=42, n_jobs=-1
     ),
     "svm_rbf_low_c": lambda: SVC(kernel="rbf", C=0.1, random_state=42),
+    # Fills in the C grid between svm_rbf_low_c (C=0.1) and svm_rbf (C=10):
+    # svm_rbf_low_c underperformed at every size tested and got worse with
+    # more data, suggesting C=0.1 overshot into underfitting rather than
+    # just removing memorization — these narrow the search toward wherever
+    # the real optimum sits. See experiment_log.md.
+    "svm_rbf_c1": lambda: SVC(kernel="rbf", C=1, random_state=42),
+    "svm_rbf_c3": lambda: SVC(kernel="rbf", C=3, random_state=42),
 }
 # Any classifier whose training cost scales the way RBF-SVM's does (roughly
 # quadratic-to-cubic in sample count) should respect --svm-max-size, not

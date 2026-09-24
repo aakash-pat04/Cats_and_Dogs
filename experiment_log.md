@@ -127,3 +127,224 @@ noticeably lower, that's also worth reporting — it would mean these
 particular models needed the extra capacity to fit the signal, and the
 overfitting we saw was a more unavoidable side effect of the feature
 representation than of hyperparameter choice alone.
+
+## 2026-09-23 (continued) — Full sweep results: P1/P2 sweeps, capped-vs-uncapped, final test-set eval
+
+### What was run
+
+Both remaining preprocessing levels (`P1_equalize`, `P2_denoise`) were swept
+with all 6 classifiers (3 originals + 3 capacity-limited variants), both
+feature levels, all 7 sizes (SVM variants capped to the 4 smaller sizes as
+before). Combined with the earlier `P0_minimal` sweep, `sweep_results.csv`
+now has complete coverage: 3 preprocessing levels x 2 feature levels x 6
+classifiers = 36 combos, 216 total rows. `merge` + `final-eval` were then
+run to pick a final combo and evaluate it once on the held-out test set.
+
+### Preprocessing level: equalize/denoise didn't help — if anything, slightly hurt
+
+Mean validation accuracy across every classifier/feature/size combo, by
+preprocessing level:
+
+| preprocess level | mean val acc | best val acc |
+|---|---|---|
+| P0_minimal | 0.639 | 0.718 |
+| P1_equalize | 0.636 | 0.718 |
+| P2_denoise | 0.633 | 0.714 |
+
+And isolating just the three original (uncapped) classifiers, broken out by
+feature level too:
+
+| preprocess level | hog | hog_lbp |
+|---|---|---|
+| P0_minimal | 0.637 | 0.645 |
+| P1_equalize | 0.632 | 0.641 |
+| P2_denoise | 0.632 | 0.634 |
+
+`P0_minimal` (plain resize + grayscale, nothing else) is consistently at
+least as good as — usually marginally better than — both `P1_equalize` and
+`P2_denoise`, in every slice we checked. The differences are small (within
+~1 point), but they're consistently in the "extra preprocessing didn't pay
+off" direction, never the other way. Our read: HOG is already a gradient-
+orientation descriptor, which is inherently fairly robust to the kind of
+global contrast/brightness changes histogram equalization corrects for —
+so equalizing ahead of HOG mostly adds noise (or a mild Gaussian blur, for
+P2) without fixing anything HOG couldn't already handle. This is a useful
+negative result for the report's "what didn't work" section.
+
+### Feature level: HOG+LBP consistently, modestly beats HOG alone
+
+`hog_lbp` beat plain `hog` at every preprocessing level (by 0.2-0.8 points
+in the table above), and by ~0.6 points on average overall (0.639 vs 0.633
+across all classifiers/sizes). Consistent but modest — LBP's texture
+information is complementary to HOG's gradient information, but doesn't
+transform performance on its own.
+
+### Capped vs. uncapped: the effect is genuinely different per classifier, and depends on training size
+
+This is the most interesting result, and it only shows up by looking at the
+per-size breakdown, not the sweep-wide average.
+
+**Decision Tree — capping is an unambiguous win that grows with data size:**
+
+| size | uncapped val acc | capped val acc | uncapped gap | capped gap |
+|---|---|---|---|---|
+| 80 | 0.551 | 0.540 | 0.449 | 0.399 |
+| 1000 | 0.578 | 0.578 | 0.422 | 0.345 |
+| 10000 | 0.580 | 0.617 | 0.420 | 0.218 |
+| max (11,498) | 0.587 | 0.618 | 0.413 | 0.202 |
+
+At small sizes the two are roughly tied. But as training size grows, the
+capped tree pulls ahead by 3+ points of validation accuracy while cutting
+the train/val gap in half — the single biggest accuracy improvement from
+any change we tried. Interpretation: an unconstrained tree just grows
+deeper and memorizes harder as it gets more data, gaining nothing; capping
+`max_depth` forces it to actually generalize, and that constraint matters
+more (not less) the more data it has to potentially overfit to.
+
+**Random Forest — capping is a small, consistent win, but not a dramatic one:**
+
+| size | uncapped val acc | capped val acc | uncapped gap | capped gap |
+|---|---|---|---|---|
+| 80 | 0.631 | 0.624 | 0.369 | 0.376 |
+| 1000 | 0.678 | 0.687 | 0.322 | 0.308 |
+| max | 0.698 | 0.704 | 0.302 | 0.244 |
+
+Capping shrinks the gap similarly to Decision Tree, but the validation
+accuracy gain is much smaller (roughly +0.5-1 point rather than +3). Makes
+sense: Random Forest's bagging already provides a form of built-in
+regularization (each tree sees a bootstrap sample and only ~90 of 8,100
+features per split), so there's less overfitting left for `max_depth` to
+fix.
+
+**SVM — lowering C to 0.1 was too aggressive, and gets worse with more data:**
+
+| size | C=10 val acc | C=0.1 val acc | C=10 train acc | C=0.1 train acc |
+|---|---|---|---|---|
+| 80 | 0.655 | 0.638 | 1.000 | 0.992 |
+| 200 | 0.682 | 0.659 | 1.000 | 0.896 |
+| 500 | 0.708 | 0.667 | 1.000 | 0.804 |
+| 1000 | 0.712 | 0.671 | 1.000 | 0.755 |
+
+Unlike the trees, `svm_rbf_low_c` never wins — it's behind at every size,
+and the gap between it and the original *widens* as training size grows
+(-1.6 points at size 80, -4.1 points at size 1000). Its own train accuracy
+also degrades with size (0.992 -> 0.755), meaning C=0.1 isn't just
+"removing memorization" the way the tree caps were — it's actively
+underfitting real signal in the data, worse the more data there is to
+underfit. A 100x drop in C (10 -> 0.1) was too big a step; a smaller
+reduction (e.g. C=1) would be a better next experiment than assuming lower
+is always better.
+
+**Secondary benefit of capping — fit time.** Independent of accuracy, the
+capped tree-based models were substantially cheaper to train at the
+largest size: Decision Tree 202s -> 88s, Random Forest 27s -> 10s. Worth
+mentioning even where the accuracy effect is small.
+
+### Final test-set evaluation
+
+Best combo by validation accuracy: **`P1_equalize` / `hog` / `svm_rbf` (C=10) / 1,000 images per class** (val accuracy 0.718). Evaluated once on the held-out test set (1,000 images, 500/class):
+
+- Test accuracy: **0.729**
+- Cats misclassified as dogs: 130/500 (26.0%)
+- Dogs misclassified as cats: 141/500 (28.2%)
+- Precision/recall/F1 (macro): 0.729 / 0.729 / 0.729
+
+The confusion is fairly balanced between the two error types (dogs-as-cats
+only slightly more common than cats-as-dogs), i.e. no strong directional
+bias toward over-predicting one class. Full numbers in
+`results/final_report.json`; visuals in `results/final_confusion_matrix.png`,
+`results/learning_curve.png`, `results/train_val_gap.png`.
+
+Notably, the winning combo used the *uncapped* SVM, not `svm_rbf_low_c` —
+consistent with the per-size table above showing the low-C variant losing
+at every size it was tested.
+
+### Takeaways for the report
+
+1. Of everything tried, **capping Decision Tree's `max_depth`** produced
+   the single largest, cleanest accuracy improvement — and the fact that
+   the improvement *grows* with training size is a good illustration that
+   "more data helps" is conditional on the model being able to use it.
+2. Preprocessing changes (equalize, denoise) and the low-C SVM variant were
+   both genuine, useful **negative results** — worth reporting as "tried,
+   didn't help" rather than omitting, since the homework explicitly asks
+   for a discussion of what did and didn't work.
+3. Accuracy plateaued around 71-73% regardless of which preprocessing/
+   feature/capacity knob was turned — suggests the ceiling here is set more
+   by the HOG/LBP feature representation itself than by these tuning
+   choices, which is a reasonable thing to say explicitly rather than imply
+   a specific config was close to optimal.
+4. A natural next experiment (not yet run): a proper small grid over SVM's
+   `C` (e.g. 1, 3, 10) and Decision Tree's `max_depth` (e.g. 5, 10, 20)
+   using validation accuracy, rather than the single arbitrary capped value
+   tested here — the SVM result in particular suggests the optimum is
+   somewhere between 0.1 and 10, not at either extreme.
+
+## 2026-09-23 (continued, PRELIMINARY) — SVM C-grid + large sizes: the earlier accuracy ceiling was an artifact, not a real limit
+
+**Status: the underlying sweep is still running as of this writing.** `svm_rbf`/`svm_rbf_low_c` are complete through 10,000/class on some (preprocess, feature) slices; the new `svm_rbf_c1`/`svm_rbf_c3` variants are complete through 5,000/class on `P0_minimal` and partway through `P1_equalize`; nothing has reached `max` (11,498/class) yet, and `P2_denoise` hasn't started the C-grid classifiers at all. This section analyzes what's landed so far (239 rows) and **will need revisiting once the full sweep finishes** — but the pattern below is consistent across every slice checked, so it's already a meaningful correction to record now rather than wait on.
+
+### The headline finding: SVM keeps improving well past where we'd stopped testing it, and the previous "~71-73% ceiling" conclusion (takeaway #3 above) was premature
+
+That earlier conclusion was based on SVM only ever having been run up to 1,000 training images per class — a limit set purely for runtime reasons (`--svm-max-size 1000`), not because SVM's accuracy had leveled off. Now that larger sizes are actually being tested, `svm_rbf` (C=10) climbs well past the old ceiling:
+
+`P0_minimal` / `hog` / `svm_rbf` (C=10), validation accuracy by size:
+
+| size/class | 80 | 200 | 500 | 1000 | 5000 | 10000 |
+|---|---|---|---|---|---|---|
+| val accuracy | 0.654 | 0.684 | 0.709 | 0.713 | **0.767** | **0.773** |
+
+0.773 is the best result seen anywhere in the entire sweep so far, beating the previous best (0.718) by 5.5 points — and it's still climbing at the last completed size, with `max` (11,498/class) not yet run. The same upward trend holds on the `P1_equalize`/`hog` slice (0.718 at 1,000 -> 0.751 at 5,000), so this isn't a one-off.
+
+### The C-grid, now with enough sizes to see the real shape of it
+
+`P0_minimal` / `hog`, validation accuracy by C and size (the most complete slice so far):
+
+| size/class | C=0.1 | C=1 | C=3 | C=10 |
+|---|---|---|---|---|
+| 80 | 0.641 | 0.655 | 0.654 | 0.654 |
+| 200 | 0.650 | 0.680 | 0.684 | 0.684 |
+| 500 | 0.652 | 0.699 | 0.708 | 0.709 |
+| 1000 | 0.670 | 0.712 | 0.713 | 0.713 |
+| 5000 | 0.700 | 0.745 | **0.767** | **0.767** |
+| 10000 | 0.714 | — | — | **0.773** |
+
+Two things worth calling out:
+
+1. **C=3 and C=10 are statistically indistinguishable at every size tested** (identical to 3 decimal places at 5,000/class: both 0.767). This suggests the useful range tops out somewhere at or before C=3 — going even higher than the homework's suggested C=10 is unlikely to help further, and C=3 gets the same accuracy while fitting noticeably faster (below).
+2. **C=1 now clearly beats C=0.1 by a wide, growing margin** (80: +1.4 pts, 5000: +4.5 pts) — confirming last entry's guess that C=0.1 overshot into underfitting. But C=1 still trails C=3/C=10 by a consistent ~2 points at every size from 500 upward, so the earlier "optimum is somewhere between 0.1 and 10" is now narrowed further: it's at or above 3, not near 1.
+
+### The train/val gap: revisits last entry's SVM finding, and it now tells a more complete story
+
+Last entry reported the gap *widening* for the original C=10 SVM from size 80 to 1000 (0.346 -> 0.287 — actually narrowing slightly, but staying wide) and concluded we hadn't seen it shrink the way Decision Tree's did. With sizes up to 10,000 now available, it does:
+
+| size/class | 80 | 200 | 500 | 1000 | 5000 | 10000 |
+|---|---|---|---|---|---|---|
+| gap (C=10) | 0.346 | 0.316 | 0.291 | 0.287 | 0.233 | 0.227 |
+
+Same shape as Decision Tree's gap curve, just needing more data before the shrinkage becomes visible — we simply hadn't given it enough data to see this in the previous entry. This reinforces the broader theme across both entries: **models with real capacity to use extra data (unconstrained SVM, unconstrained/capped trees) generalize better with more of it; only models that are already saturated or mis-regularized (C=0.1, an unconstrained single Decision Tree with no cap) fail to benefit.**
+
+### Cost side of the picture
+
+At size=5,000 (`P0_minimal`/`hog`), fit time tracks C directly, not just accuracy:
+
+| classifier | C | fit_time_sec | train_predict_time_sec |
+|---|---|---|---|
+| svm_rbf_low_c | 0.1 | 92 | 214 |
+| svm_rbf_c1 | 1 | 94 | 198 |
+| svm_rbf_c3 | 3 | 309 | 222 |
+| svm_rbf | 10 | 316 | 224 |
+
+C=3 costs roughly the same as C=10 (both ~3.3x slower to fit than C=1/C=0.1) for identical accuracy — so if compute time matters, **C=3 is a strictly better choice than C=10**: same accuracy, same cost, and it's a gentler regularization setting (usually preferable when two options tie). Note also that `train_predict_time_sec` (evaluating the classifier back on its own ~10,000-image training set, needed for the train_accuracy column) is now the dominant cost at this scale, bigger than fitting itself — a real trade-off of tracking the train/val gap this thoroughly at large sizes.
+
+### Revised takeaways (supersedes takeaway #3 above)
+
+1. **The "~71-73% accuracy ceiling" from the previous entry was not a real ceiling** — it was an artifact of capping SVM's training size at 1,000 for runtime reasons. SVM(C>=3) reaches 77.3% at 10,000/class and is still climbing. This is the single most important correction from this round.
+2. **C=3 matches C=10's accuracy at a fraction of the "how far did we need to push regularization down" uncertainty**, and ties it exactly on cost too — worth using C=3 as the default going forward rather than the homework's example C=10.
+3. The train/val gap for high-C SVM does eventually shrink with more data, same as Decision Tree — the earlier apparent difference between the two was just an artifact of not having tested SVM far enough.
+
+### Next steps to improve accuracy (see also the reply to the user for the full prioritized list)
+
+- **Let the SVM(C=10 and C=3) runs reach `max` size** — highest expected value of anything remaining in the current sweep, given the trend hasn't leveled off yet.
+- Given C=3≈C=10, **deprioritize further C=1/C=0.1 large-size runs** (their trend is already clear: consistently behind, gap unlikely to close) in favor of getting C=3/C=10 to `max` faster, and finishing `P2_denoise`'s C-grid for completeness.
+- Once `max` is in, revisit whether `P0_minimal` (no equalize/denoise) still leads at this scale, or whether the ranking of preprocessing levels changes now that the classifier itself is far more accurate — last entry's preprocessing comparison was also implicitly capped at the smaller sizes typical classifiers reach quickly.
