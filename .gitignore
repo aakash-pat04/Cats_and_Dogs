@@ -9,3 +9,8 @@ results/split_cache.config.json
 results/sweep_results.csv
 results/final_report.json
 results/*.png
+results/debug/
+results/pooling_results.csv
+results/jury.json
+results/jury_dryrun_val.json
+results/final_report.previous_*.json

@@ -11,6 +11,10 @@
 # Any arguments given are passed straight through to `run_experiments.py
 # sweep`. Syncs whatever chunk progress exists even if interrupted
 # (Ctrl-C) partway — nothing completed is lost.
+#
+# --train-sizes is a top-level option of run_experiments.py (it must come
+# before `sweep`), so pass it through the TRAIN_SIZES environment variable:
+#   TRAIN_SIZES=1000,5000 ./run_and_sync.sh --preprocess-level ... 
 
 set -uo pipefail
 
@@ -23,6 +27,10 @@ sync_results() {
     echo
     echo "==> Syncing chunk results to results-sync..."
     git add results/chunks/*.csv 2>/dev/null
+    # Saved val scores feed evidence pooling (`run_experiments.py pool`), which
+    # needs every machine's scores in one place. Separate `git add` so an
+    # empty glob here can't block adding the chunk CSVs above.
+    git add results/val_scores/*.npz 2>/dev/null
     if git diff --cached --quiet; then
         echo "No new/changed chunk files to commit."
         return
@@ -46,5 +54,11 @@ fi
 echo "==> Pulling latest results-sync before starting (avoids redoing already-completed combos)..."
 git pull origin results-sync
 
-echo "==> Running: python run_experiments.py sweep ${ORIGINAL_ARGS}"
-python run_experiments.py sweep "$@"
+TOP_LEVEL_ARGS=()
+if [ -n "${TRAIN_SIZES:-}" ]; then
+    TOP_LEVEL_ARGS+=(--train-sizes "$TRAIN_SIZES")
+    ORIGINAL_ARGS="TRAIN_SIZES=${TRAIN_SIZES} ${ORIGINAL_ARGS}"
+fi
+
+echo "==> Running: python run_experiments.py ${TOP_LEVEL_ARGS[*]:-} sweep ${ORIGINAL_ARGS}"
+python run_experiments.py ${TOP_LEVEL_ARGS[@]+"${TOP_LEVEL_ARGS[@]}"} sweep "$@"

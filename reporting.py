@@ -2,9 +2,10 @@
 run the single, one-time held-out test-set evaluation (accuracy, confusion
 matrix, classification report) for the homework report.
 
-`evaluate_final_on_test` is the only function in this codebase that reads
-`DatasetSplit.test_records` — everything else in the sweep only ever touches
-the validation set, so the test set is never used for repeated tuning.
+`evaluate_final_on_test` and `evaluate_jury` (with part="test") are the
+only functions in this codebase that read `DatasetSplit.test_records` —
+everything else in the sweep only ever touches the validation set, so the
+test set is never used for repeated tuning.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List
 
 import matplotlib
 
@@ -22,10 +23,10 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 from sklearn.metrics import classification_report, confusion_matrix
-from sklearn.preprocessing import StandardScaler
 
-from dataset_split import DatasetSplit, training_subset
-from features import FeatureConfig, PREPROCESS_LEVELS_BY_NAME, build_feature_vector, compute_or_load_raw_features
+from dataset_split import DatasetSplit
+from features import FEATURE_LEVELS, PREPROCESS_LEVELS_BY_NAME, build_feature_vector, load_feature_blocks, training_matrix
+from pooling import combine, decision_scores
 
 logger = logging.getLogger(__name__)
 
@@ -126,38 +127,30 @@ def plot_train_val_gap(
     logger.info("Saved train/val gap plot to %s", out_path)
 
 
-def evaluate_final_on_test(
-    best_row: pd.Series, split: DatasetSplit, fc: FeatureConfig, cache_dir: Path
-) -> Dict[str, object]:
-    """Refit the winning combo on its exact training slice and score it once on the test set."""
+def evaluate_final_on_test(best_row: pd.Series, split: DatasetSplit, cache_dir: Path) -> Dict[str, object]:
+    """Refit the winning combo on its exact training slice and score it once on the test set.
+
+    The training data is rebuilt with the same helpers the sweep uses
+    (including flip augmentation, if the winning level has it), and the
+    classifier pipeline carries its own train-only StandardScaler.
+    """
+    from run_experiments import build_classifier, load_train_pool
+
     level = PREPROCESS_LEVELS_BY_NAME[best_row["preprocess_level"]]
     feature_level = best_row["feature_level"]
+    block_names = list(FEATURE_LEVELS[feature_level])
     n = int(best_row["n_train_per_class"])
-    pool_max = min(len(split.cat_train_pool), len(split.dog_train_pool))
 
-    train_records = training_subset(split, pool_max)
-    train_hog, train_lbp, _, _ = compute_or_load_raw_features(train_records, level, fc, "train_pool", cache_dir)
-    test_hog, test_lbp, test_labels, test_paths = compute_or_load_raw_features(
-        split.test_records, level, fc, "test", cache_dir
+    train_blocks, flip_blocks, pool_max = load_train_pool(split, level, cache_dir, block_names)
+    X_train, y_train = training_matrix(train_blocks, flip_blocks, feature_level, pool_max, n)
+    test_blocks, test_labels, test_paths = load_feature_blocks(
+        split.test_records, level, level.fc, "test", cache_dir, block_names
     )
+    X_test = build_feature_vector(test_blocks, feature_level)
 
-    X_train_full = build_feature_vector(train_hog, train_lbp, feature_level)
-    X_test = build_feature_vector(test_hog, test_lbp, feature_level)
-
-    cat_rows = X_train_full[:n]
-    dog_rows = X_train_full[pool_max : pool_max + n]
-    X_train = np.concatenate([cat_rows, dog_rows], axis=0)
-    y_train = np.concatenate([np.zeros(n, dtype=int), np.ones(n, dtype=int)])
-
-    scaler = StandardScaler().fit(X_train)
-    X_train_s = scaler.transform(X_train)
-    X_test_s = scaler.transform(X_test)
-
-    from run_experiments import CLASSIFIER_BUILDERS
-
-    clf = CLASSIFIER_BUILDERS[best_row["classifier"]]()
-    clf.fit(X_train_s, y_train)
-    y_pred = clf.predict(X_test_s)
+    clf = build_classifier(best_row["classifier"], X_train.shape[1])
+    clf.fit(X_train, y_train)
+    y_pred = clf.predict(X_test)
 
     cm = confusion_matrix(test_labels, y_pred, labels=[0, 1])
     report_dict = classification_report(test_labels, y_pred, target_names=["cat", "dog"], output_dict=True)
@@ -187,6 +180,71 @@ def evaluate_final_on_test(
         "dog_as_cat_count": dog_as_cat,
         "dog_as_cat_rate": dog_as_cat / n_test_dog if n_test_dog else None,
         "test_paths": test_paths,
+    }
+
+
+def _size_to_n(split: DatasetSplit, size_key: str) -> int:
+    pool_max = min(len(split.cat_train_pool), len(split.dog_train_pool))
+    return pool_max if size_key == "max" else int(size_key)
+
+
+def evaluate_jury(jury: Dict[str, object], split: DatasetSplit, cache_dir: Path, part: str) -> Dict[str, object]:
+    """Refit every jury member on its training slice, score `part` ("val" or "test"), and pool the votes.
+
+    `part="val"` is the dry run: the same code path as the real evaluation,
+    checked against the pooled val accuracy `pool` reported, without
+    touching the test set. `part="test"` is the one-time final evaluation.
+    Pooling uses the rule, TTA setting and (for "weighted") the member val
+    accuracies fixed in `jury` — nothing is re-tuned on the evaluation set.
+    """
+    from run_experiments import build_classifier, load_eval_features, load_train_pool
+
+    if part not in ("val", "test"):
+        raise ValueError(f"part must be 'val' or 'test', got {part!r}")
+    records = split.val_records if part == "val" else split.test_records
+    use_tta = bool(jury["use_tta"])
+
+    member_scores: List[np.ndarray] = []
+    member_accs: List[float] = []
+    per_member = []
+    labels = None
+    for m in jury["members"]:
+        level = PREPROCESS_LEVELS_BY_NAME[m["preprocess_level"]]
+        feature_level = m["feature_level"]
+        block_names = list(FEATURE_LEVELS[feature_level])
+        n = _size_to_n(split, str(m["train_size_key"]))
+        logger.info("Jury member %s/%s/%s/%s: fitting on %d/class", level.name, feature_level, m["classifier"], m["train_size_key"], n)
+
+        train_blocks, flip_blocks, pool_max = load_train_pool(split, level, cache_dir, block_names)
+        X_train, y_train = training_matrix(train_blocks, flip_blocks, feature_level, pool_max, n)
+        clf = build_classifier(m["classifier"], X_train.shape[1])
+        clf.fit(X_train, y_train)
+        del X_train, train_blocks, flip_blocks
+
+        eval_blocks, eval_flip_blocks, labels = load_eval_features(records, level, part, cache_dir, block_names)
+        scores = decision_scores(clf, build_feature_vector(eval_blocks, feature_level))
+        if use_tta:
+            scores = (scores + decision_scores(clf, build_feature_vector(eval_flip_blocks, feature_level))) / 2
+        member_scores.append(scores)
+        member_accs.append(float(m["val_accuracy"]))
+        per_member.append({**m, f"{part}_accuracy": float(((scores > 0).astype(int) == labels).mean())})
+
+    y_pred = (combine(member_scores, member_accs, jury["rule"]) > 0).astype(int)
+    cm = confusion_matrix(labels, y_pred, labels=[0, 1])
+    report_dict = classification_report(labels, y_pred, target_names=["cat", "dog"], output_dict=True)
+    n_cat, n_dog = int((labels == 0).sum()), int((labels == 1).sum())
+    return {
+        "evaluated_on": part,
+        "jury": {"rule": jury["rule"], "use_tta": use_tta, "members": per_member},
+        "accuracy": float((y_pred == labels).mean()),
+        "confusion_matrix": cm.tolist(),
+        "classification_report": report_dict,
+        "n_test_cat": n_cat,
+        "n_test_dog": n_dog,
+        "cat_as_dog_count": int(cm[0, 1]),
+        "cat_as_dog_rate": int(cm[0, 1]) / n_cat if n_cat else None,
+        "dog_as_cat_count": int(cm[1, 0]),
+        "dog_as_cat_rate": int(cm[1, 0]) / n_dog if n_dog else None,
     }
 
 
