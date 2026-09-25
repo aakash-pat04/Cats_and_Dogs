@@ -348,3 +348,129 @@ C=3 costs roughly the same as C=10 (both ~3.3x slower to fit than C=1/C=0.1) for
 - **Let the SVM(C=10 and C=3) runs reach `max` size** — highest expected value of anything remaining in the current sweep, given the trend hasn't leveled off yet.
 - Given C=3≈C=10, **deprioritize further C=1/C=0.1 large-size runs** (their trend is already clear: consistently behind, gap unlikely to close) in favor of getting C=3/C=10 to `max` faster, and finishing `P2_denoise`'s C-grid for completeness.
 - Once `max` is in, revisit whether `P0_minimal` (no equalize/denoise) still leads at this scale, or whether the ranking of preprocessing levels changes now that the classifier itself is far more accurate — last entry's preprocessing comparison was also implicitly capped at the smaller sizes typical classifiers reach quickly.
+
+## 2026-09-24 — Round 2: subject cropping, flip augmentation, richer features, new model families
+
+**Goal**: get from ~77% toward 90% val accuracy. Professor's suggestion: zoom into the subject / remove the background. Constraints unchanged (no deep learning, test set touched once).
+
+### A correction to the handoff first: the test set has already been touched once
+
+`results/final_report.json` (2026-09-23 19:47) shows `final-eval` already ran on P1_equalize/hog/svm_rbf/1000 → **72.9% test**, even though the handoff says it never ran. Decision: disclose it in the report as an early end-to-end pipeline smoke test. The final model's `final-eval` is the one real test result. No selection has used that number.
+
+### Code changes (all additive; old results reproduce exactly)
+
+- `subject.py` (new): `center_square` crop and a `saliency` crop (spectral-residual saliency, Hou & Zhang 2007: classical, no learned model).
+- `PreprocessConfig.crop_mode` / `flip`. Both are `repr=False` with `cache_extras()`, so every pre-existing feature cache keeps its signature. Crop parameters are folded into the signature.
+- `features.py`: named feature *blocks* (`hog`, `lbp`, `hog16` coarse HOG, `slbp` spatial LBP, `color` HSV histogram), each cached separately. Extraction is parallel via joblib (all 5 blocks for the 23k-image pool take ~90 s per level on the M4). New levels are `P3_square`, `P4_saliency`, and `*_flip`, which add mirrored copies of the training images; val/test are never flipped. `--preprocess-level all` / `--feature-level all` still mean the original levels, so commands in flight on other machines are unchanged.
+- `run_experiments.py`: every classifier is now a `Pipeline(StandardScaler, model)`. The scaler is still fit on each training slice only, as before, and `final-eval` can't scale differently from the sweep.
+  - New models: `linsvc_*`, `hellinger_*`, `nystroem_svm_c1`, `pca_svm_c3` (PCA-512 → RBF SVC C=3), `hgb`, `lightgbm`, `xgboost`.
+  - `SVC(cache_size=2000)`.
+  - `--n-jobs` runs fits concurrently on threads. This works because libsvm releases the GIL: 2 fits took 1.38 s vs 2.55 s sequential.
+  - `--train-acc-sample` computes train metrics on a random subsample; round-2 screening used 2000 rows.
+- **Verified**: legacy caches load, and parallel extraction is bit-identical to them. `decision_tree_capped` (all 7 sizes) and `svm_rbf_c3` (500/1k/5k) reproduce their old val/train accuracies exactly. `cache_size=2000` alone cut the 5k SVC fit from 222 s to 152 s.
+- Note: `fit_time_sec` now includes fitting the StandardScaler (negligible), and fits run with `--n-jobs > 1` share the CPU, so their times are inflated compared to solo runs.
+
+### Screening results (val accuracy, fixed val set, 1k and 5k per class)
+
+**Models on P0_minimal/hog** (reference: svm_rbf_c3 = 0.713 / 0.767):
+
+| classifier | 1k | 5k |
+|---|---|---|
+| pca_svm_c3 | **0.722** | **0.770** |
+| nystroem_svm_c1 | 0.716 | 0.740 (underfits: train 0.84) |
+| hellinger_svm_c3 | 0.707 | 0.758 |
+| lightgbm | **0.727** | 0.745 |
+| xgboost | 0.698 | 0.747 |
+| hgb | 0.688 | 0.730 |
+| linsvc_c1e-3 / c1e-2 | 0.669 / 0.656 | 0.676 / 0.649 |
+| hellinger_linsvc | 0.653 | 0.683 |
+
+PCA→RBF-SVM matches or beats the exact SVM at roughly half the cost, so it's the screening model from here on. Linear SVMs on raw HOG are ~9 points behind: the RBF kernel matters. Gradient-boosted trees land ~2.5 points behind the SVM on raw HOG. They're kept for later fusion, not as the main model.
+
+**Preprocessing (pca_svm_c3, hog)** — P0 reference 0.722 / 0.770:
+
+| level | 1k | 5k |
+|---|---|---|
+| P3_square (center square crop: stop stretching) | 0.732 | 0.788 |
+| P4_saliency (saliency zoom) | 0.698 | 0.780 |
+| P0_minimal_flip | 0.751 | **0.806** |
+| P3_square_flip | **0.764** | 0.799 |
+| P4_saliency_flip | 0.744 | 0.800 |
+
+- The aspect-ratio fix alone is worth ~+2 points at 5k. Stretching was squashing ~70% of images by >20% (median aspect ratio 1.25).
+- Saliency zoom beats stretching but loses to a plain center square. Spectral-residual saliency fires on cage bars and busy fabric as often as on the animal (`results/debug/saliency_grid.png`). The default (90% saliency mass) never zoomed at all, so it's tuned to 60% mass + 5% margin.
+- Flip augmentation is the biggest preprocessing win (+3.6 at 5k), consistent with the learning curves still climbing: effectively more data.
+
+**Features (pca_svm_c3, P0_minimal)** — hog reference 0.722 / 0.770:
+
+| feature level | dims | 1k | 5k |
+|---|---|---|---|
+| hog_slbp | 9,988 | 0.754 | 0.805 |
+| hog2_slbp | 11,752 | 0.752 | **0.814** |
+| hog2_slbp_color | 11,880 | **0.761** | **0.815** |
+
+Replacing the single 10-bin global LBP histogram with a 4×4 grid of 59-bin histograms at two radii is worth +3.5 points. That's a far bigger jump than the original `hog_lbp` vs `hog` (+0.5–1), which suggests the global histogram threw away most of LBP's value. Coarse 16×16-cell HOG adds another ~1 point. Color adds ~0.1 at 5k, and it's pending the professor's OK anyway.
+
+**Combining the winners (pca_svm_c3, hog2_slbp)**: they stack.
+
+| level | 1k | 5k | 10k | max (11,498) |
+|---|---|---|---|---|
+| P3_square | 0.787 | 0.827 | | |
+| P0_minimal_flip | 0.794 | 0.833 | | |
+| **P3_square_flip** | 0.792 | 0.843 | 0.845 | **0.860** |
+
+Tuning neighbors at 5k on P3_square_flip/hog2_slbp: `pca_svm_c10` 0.848, `pca1024_svm_c3` 0.849, vs 0.843 for `pca_svm_c3`. Those gaps are within noise: 1,000 val images give a standard error of ~1.1 points.
+
+**New best: P3_square_flip / hog2_slbp / pca_svm_c3 / max → 0.860 val** (was 0.773). That's +8.7 points, from:
+- no stretching (square crop),
+- flip augmentation,
+- spatial LBP + coarse HOG,
+- PCA → RBF SVM.
+
+The max-size fit (45,992 rows including flips) took 1,650 s on the M4 with 2 concurrent jobs.
+
+### Revised next steps
+1. Stacking/fusion: pca_svm + LightGBM (different model families) → logistic regression, using internal CV on train only.
+2. `pca1024_svm_c10` at max: the C/PCA gains were small but both pointed the same way.
+3. Whether color stays in depends on the professor's answer.
+4. Then pick on val, run `final-eval` once, and write the report.
+
+## 2026-09-24 (later) — Round 3 setup: professor's guidance, and the code for it
+
+Professor's new guidance:
+- Deep learning is **allowed in preprocessing**, and encouraged for segmentation / background removal.
+- Post-processing and deblurring are options.
+- "Evidence pooling" = several models acting as a **jury**, deciding by majority or weighted vote.
+- Try other resolutions: classmates did better at 256×256.
+
+The experiments are run by the user across three Macs, following `RUNBOOK_round3.md`. This entry records what was built and smoke-tested. Results go in the next entry.
+
+### What was added
+- **Segmentation** (`segment.py`, `subject.py`)
+  - `rembg` salient-object models (IS-Net / U²-Net / BiRefNet) produce class-agnostic foreground masks, once, stored as PNGs in `data/masks/<model>/`. Only the mask is used; nothing class-related comes from the network.
+  - Levels:
+    - `P5_maskcrop` (square crop around the mask)
+    - `P6_maskcrop_bggray` / `P7_maskcrop_bgblur` (background removed → flat gray / heavy blur)
+    - `P5_maskcrop_raw` (no mask cleanup)
+  - Mask cleanup = open/close + largest component + hole fill: the "post-processing" ablation.
+  - Masks under 5% of the image count as failed segmentation, and the whole image is used instead. This avoids erasing animals behind fences.
+  - New blocks: `shape` (silhouette HOG + Hu moments + area/aspect) and `slbp_fg` (spatial LBP on foreground pixels only).
+- **Resolution** (per-level `FeatureConfig`):
+  - `r192` and `r256c16` keep the 128/8-px cell geometry, computed from more pixels.
+  - `r256c8` is the finer 44.6k-dim setup, without flips because of memory.
+- **Deblurring**: `unsharp` (unsharp masking) and `rl` (Richardson–Lucy, Gaussian PSF σ=1, 10 iterations), plus a `blur-report` diagnostic.
+- **Jury / evidence pooling** (`pooling.py`)
+  - Every sweep run now saves its val decision scores plus flip-TTA scores to `results/val_scores/`.
+  - `pool` combines them by majority / soft (per-member std-normalized mean) / weighted (log-odds of val accuracy), with greedy diverse member selection and a McNemar test.
+  - `final-eval --jury`, with `--dry-run-on-val`.
+- **Safety**:
+  - `final-eval` refuses a second test-set look unless `--archive-previous` is passed, which keeps the 2026-09-23 smoke-test report for disclosure.
+  - `CappedPCA` fixes a latent crash of `pca_svm_*` at 80/class, with no change to results at ≥1k.
+
+### Smoke-test observations (scratch results dir, not in sweep_results.csv; the runbook's jury runs will record them properly)
+- **Reference reproduces exactly** with the new code: P3_square_flip / hog2_slbp / pca_svm_c3 = 0.792 @1k, 0.843 @5k. Flip TTA gives 0.793 / 0.846.
+- **LightGBM on hog2_slbp** (P3_square_flip, 5k): 0.841, and **0.853 with flip TTA**. On the richer features it's now competitive with the SVM (it was ~2.5 points behind on plain HOG).
+- **Jury of those two** (soft vote + TTA, 5k): **0.861** val vs. 0.853 for the best single model (McNemar p=0.32, not significant yet). `final-eval --jury --dry-run-on-val` reproduced 0.861 exactly.
+- **IS-Net segmentation**: 0.74 s/img on the M4 (≈5 h for all 25k images on one machine), with visually clean masks. The model misses animals behind chain-link fences.
+- **Blur** (400-image sample, Laplacian variance): median 536 at 128 px vs. 252 at 256 px. Images look sharp at the working resolution, so deblurring is expected to matter mainly at 256.
+- **onnxruntime has no Intel-Mac wheels for Python 3.14**, so masks are generated on the Apple Silicon machines only (`requirements-segment.txt` is kept separate).

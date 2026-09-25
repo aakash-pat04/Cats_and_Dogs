@@ -1,0 +1,6 @@
+# Only needed on the machines that GENERATE segmentation masks (segment.py pilot/run).
+# Machines that only use the finished masks don't need these. onnxruntime has
+# no Intel-Mac wheels for Python 3.14 (newest: Python 3.12), so on an Intel Mac
+# this needs a separate Python 3.12 venv — or just generate masks on Apple Silicon.
+rembg
+onnxruntime
