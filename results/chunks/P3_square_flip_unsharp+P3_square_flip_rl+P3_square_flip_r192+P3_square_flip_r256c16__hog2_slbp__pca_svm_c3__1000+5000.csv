@@ -1,0 +1,2 @@
+preprocess_level,feature_level,classifier,train_size_key,n_train_per_class,n_train_total,feature_dim,train_accuracy,train_precision_macro,train_recall_macro,train_f1_macro,val_accuracy,val_precision_macro,val_recall_macro,val_f1_macro,fit_time_sec,train_predict_time_sec,val_predict_time_sec,seed,timestamp
+P3_square_flip_r256c16,hog2_slbp,pca_svm_c3,1000,1000,4000,12696,0.9985,0.9984909456740443,0.9985133795837463,0.9984999156202536,0.811,0.8135396713378364,0.8109999999999999,0.8106164984092787,9.857074300001841,5.742539074009983,2.589990577005665,42,2026-09-26T03:11:17+00:00
