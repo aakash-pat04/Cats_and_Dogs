@@ -17,6 +17,7 @@ import hashlib
 import logging
 import os
 import time
+import zipfile
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
@@ -469,11 +470,29 @@ def _block_signature(records: Sequence[Record], config: PreprocessConfig, fc: Fe
 def _load_if_valid(path: Path, signature: str) -> Optional[np.lib.npyio.NpzFile]:
     if not path.exists():
         return None
-    cached = np.load(path, allow_pickle=False)
-    if str(cached["signature"]) == signature:
+    try:
+        cached = np.load(path, allow_pickle=False)
+        stored = str(cached["signature"]) if "signature" in cached.files else None
+    except (OSError, ValueError, zipfile.BadZipFile) as exc:
+        stored = None
+        logger.warning("Cache at %s is unreadable (%s); recomputing", path, exc)
+    if stored is None:
+        # A cache written before saves were atomic can be incomplete: an
+        # interrupted np.savez_compressed still closes the zip cleanly, just
+        # without the members it hadn't reached yet (e.g. the signature).
+        logger.warning("Cache at %s is incomplete (interrupted write?); recomputing", path)
+        return None
+    if stored == signature:
         return cached
     logger.info("Cache at %s is stale (signature mismatch); recomputing", path)
     return None
+
+
+def _save_npz_atomic(path: Path, **arrays: np.ndarray) -> None:
+    """Write an .npz via a temp file + rename, so an interrupted run never leaves a partial cache."""
+    tmp = path.with_name(path.name + ".tmp.npz")
+    np.savez_compressed(tmp, **arrays)
+    tmp.replace(path)
 
 
 def load_feature_blocks(
@@ -530,7 +549,7 @@ def load_feature_blocks(
     if missing:
         computed = extract_blocks(records, config, fc, missing)
         if "hog" in computed:
-            np.savez_compressed(
+            _save_npz_atomic(
                 legacy_path,
                 hog=computed["hog"],
                 lbp=computed["lbp"],
@@ -543,7 +562,7 @@ def load_feature_blocks(
             if b in _LEGACY_BLOCKS:
                 continue
             path = cache_dir / f"{stem}__{b}.npz"
-            np.savez_compressed(path, X=computed[b], signature=np.array(_block_signature(records, config, fc, b)))
+            _save_npz_atomic(path, X=computed[b], signature=np.array(_block_signature(records, config, fc, b)))
             logger.info("Cached %s to %s", b, path)
         blocks.update(computed)
 
