@@ -205,6 +205,11 @@ CLASSIFIER_BUILDERS: Dict[str, Callable[[int], object]] = {
     ),
 }
 
+# Optional model libraries: if one can't be imported, remember why, so asking
+# for it gives the real reason (not installed / libomp missing) instead of
+# just "unknown classifier".
+_UNAVAILABLE_CLASSIFIERS: Dict[str, str] = {}
+
 try:
     from lightgbm import LGBMClassifier
 
@@ -214,8 +219,8 @@ try:
             subsample=0.8, subsample_freq=1, random_state=42, n_jobs=-1, verbose=-1,
         )
     )
-except ImportError:  # optional dependency
-    pass
+except Exception as exc:  # ImportError if not installed; OSError/other if libomp is missing
+    _UNAVAILABLE_CLASSIFIERS["lightgbm"] = f"{type(exc).__name__}: {exc}"
 
 try:
     from xgboost import XGBClassifier
@@ -226,8 +231,8 @@ try:
             colsample_bytree=0.3, subsample=0.8, random_state=42, n_jobs=-1,
         )
     )
-except ImportError:  # optional dependency
-    pass
+except Exception as exc:
+    _UNAVAILABLE_CLASSIFIERS["xgboost"] = f"{type(exc).__name__}: {exc}"
 
 # Exact kernel SVMs, whose training cost scales roughly quadratically in
 # sample count, respect --svm-max-size. (Linear/Nystroem SVMs scale
@@ -520,6 +525,12 @@ def run_sweep_chunk(args: argparse.Namespace) -> None:
     block_names = blocks_for(feature_levels)
     classifiers = [c.strip() for c in args.classifiers.split(",") if c.strip()]
     for c in classifiers:
+        if c in _UNAVAILABLE_CLASSIFIERS:
+            raise RuntimeError(
+                f"Classifier {c!r} is unavailable on this machine because its library failed to import: "
+                f"{_UNAVAILABLE_CLASSIFIERS[c]}\nFix: `brew install libomp` and `pip install -r requirements.txt` "
+                f"(inside the venv), then check with: python -c \"import {c}\""
+            )
         if c not in CLASSIFIER_BUILDERS:
             raise ValueError(f"Unknown classifier {c!r}; choices: {sorted(CLASSIFIER_BUILDERS)}")
 
