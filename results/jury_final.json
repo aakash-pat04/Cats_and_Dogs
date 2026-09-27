@@ -1,0 +1,51 @@
+{
+  "rule": "weighted",
+  "use_tta": false,
+  "val_accuracy": 0.915,
+  "members": [
+    {
+      "preprocess_level": "P6_maskcrop_bggray_flip",
+      "feature_level": "hog2_slbp_color",
+      "classifier": "hgb",
+      "train_size_key": "max",
+      "val_accuracy": 0.901
+    },
+    {
+      "preprocess_level": "P6_maskcrop_bggray_flip",
+      "feature_level": "hog2_slbp",
+      "classifier": "lightgbm",
+      "train_size_key": "max",
+      "val_accuracy": 0.895
+    },
+    {
+      "preprocess_level": "P3_square_flip",
+      "feature_level": "hog2_slbp_color",
+      "classifier": "hgb",
+      "train_size_key": "max",
+      "val_accuracy": 0.868
+    },
+    {
+      "preprocess_level": "P3_square_flip_unsharp",
+      "feature_level": "hog2_slbp",
+      "classifier": "pca_svm_c3",
+      "train_size_key": "max",
+      "val_accuracy": 0.866
+    },
+    {
+      "preprocess_level": "P6_maskcrop_bggray_flip",
+      "feature_level": "hog2_slbp",
+      "classifier": "pca_svm_c3",
+      "train_size_key": "max",
+      "val_accuracy": 0.885
+    },
+    {
+      "preprocess_level": "P3_square_flip_rl",
+      "feature_level": "hog2_slbp",
+      "classifier": "pca_svm_c3",
+      "train_size_key": "max",
+      "val_accuracy": 0.849
+    }
+  ],
+  "created": "2026-09-27T20:57:46+00:00",
+  "note": "Chosen by held-out check (pick on half of val, score on other half, 100x2 splits): weighted K=6 no-TTA had the best held-out accuracy (0.913) of the procedures tried."
+}
