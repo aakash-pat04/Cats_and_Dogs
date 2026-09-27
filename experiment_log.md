@@ -578,3 +578,48 @@ These are all within noise, so no clear gain. Once the background is gray, HOG a
 So a realistic expectation for the test set is **~89% for the jury vs. ~88% for the best single model**. The jury gain is real (+1.1 to +1.4 held-out), but smaller than the raw val numbers suggest (+2.4). Soft/weighted votes beat plain majority.
 
 **Intel MBP issue:** LightGBM/XGBoost failed there because its repo's `.venv` pointed at another venv (moved folder). Fixed with a fresh venv. Its SVM `--backfill-scores` run exited without producing rows (cause unknown). That doesn't matter anymore: P3_square_flip SVM members at 5k are superseded by max-size members.
+
+## 2026-09-27 — Full-size members and the final jury choice
+
+All max-size runs were trained on the M4 Air, the same machine that runs `final-eval`.
+
+| member (max size) | val | val + flip TTA |
+|---|---|---|
+| P6_maskcrop_bggray_flip / hog2_slbp_color / hgb | **0.901** | 0.893 |
+| P6_maskcrop_bggray_flip / hog2_slbp_color / lightgbm | 0.900 | 0.895 |
+| P6_maskcrop_bggray_flip / hog2_slbp / lightgbm | 0.895 | 0.897 |
+| P6_maskcrop_bggray_flip / hog2_slbp / pca_svm_c3 | 0.885 | 0.885 |
+| P6_maskcrop_bggray_flip / hog2_slbp / xgboost | 0.881 | 0.875 |
+| P3_square_flip / hog2_slbp_color / hgb | 0.868 | 0.872 |
+| P3_square_flip_unsharp / hog2_slbp / pca_svm_c3 | 0.866 | 0.861 |
+| P3_square_flip / hog2_slbp_color / xgboost | 0.860 | 0.860 |
+| P3_square_flip_rl / hog2_slbp / pca_svm_c3 | 0.849 | 0.848 |
+
+- At full size, the boosted trees on P6 + color overtake the SVM: 0.901 vs. 0.885.
+- Color histograms are used from here on (hand-crafted; the professor allowed deep learning in preprocessing, so a classical color histogram is well within bounds).
+
+**Pooling over these 9** (`pool --min-size 11000`): the best raw val is 0.915, reached by soft K=3 + TTA, weighted K=6, and weighted K=6 + TTA.
+
+**Held-out check** (100 random half/half val splits: choose on one half, score on the other):
+
+| procedure | held-out |
+|---|---|
+| best single model | 0.894 |
+| best single model + TTA | 0.891 |
+| soft K=3 + TTA (what `pool` picked, via its smallest-K tie-break) | 0.907 |
+| soft K=5 + TTA | 0.908 |
+| weighted K=5 + TTA | 0.909 |
+| weighted K=6 + TTA | 0.912 |
+| **weighted K=6, no TTA** | **0.913** |
+
+**Final choice: weighted vote, K=6, no TTA** → `results/jury_final.json`. Val 0.915 vs. 0.901 for the best single model (full-val McNemar p=0.065). In the held-out check it beats the best single model by ~2 points, consistently.
+
+Members:
+1. P6 / hog2_slbp_color / hgb
+2. P6 / hog2_slbp / lightgbm
+3. P3_square_flip / hog2_slbp_color / hgb
+4. P3_square_flip_unsharp / hog2_slbp / pca_svm_c3
+5. P6 / hog2_slbp / pca_svm_c3
+6. P3_square_flip_rl / hog2_slbp / pca_svm_c3
+
+The jury mixes three preprocessing views (gray background, square crop + sharpening, square crop + deblurring) and two model families. Expected test accuracy: ~91% (held-out estimate), with an uncertainty of about ±1 point.
