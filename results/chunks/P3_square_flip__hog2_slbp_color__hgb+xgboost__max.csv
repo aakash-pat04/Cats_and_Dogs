@@ -1,0 +1,3 @@
+preprocess_level,feature_level,classifier,train_size_key,n_train_per_class,n_train_total,feature_dim,train_accuracy,train_precision_macro,train_recall_macro,train_f1_macro,val_accuracy,val_precision_macro,val_recall_macro,val_f1_macro,fit_time_sec,train_predict_time_sec,val_predict_time_sec,seed,timestamp
+P3_square_flip,hog2_slbp_color,hgb,max,11498,45992,11880,0.9845,0.9845558899454008,0.9844817517080273,0.9844988800440831,0.868,0.8680942321234236,0.868,0.8679915514592934,350.76241745904554,0.10625779198016971,0.257409457990434,42,2026-09-27T20:41:53+00:00
+P3_square_flip,hog2_slbp_color,xgboost,max,11498,45992,11880,1.0,1.0,1.0,1.0,0.86,0.8605769230769231,0.86,0.8599439775910365,302.7643168340437,0.10475358297117054,0.14879195799585432,42,2026-09-27T20:47:16+00:00
