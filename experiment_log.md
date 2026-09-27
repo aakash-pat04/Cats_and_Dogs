@@ -474,3 +474,62 @@ The experiments are run by the user across three Macs, following `RUNBOOK_round3
 - **IS-Net segmentation**: 0.74 s/img on the M4 (≈5 h for all 25k images on one machine), with visually clean masks. The model misses animals behind chain-link fences.
 - **Blur** (400-image sample, Laplacian variance): median 536 at 128 px vs. 252 at 256 px. Images look sharp at the working resolution, so deblurring is expected to matter mainly at 256.
 - **onnxruntime has no Intel-Mac wheels for Python 3.14**, so masks are generated on the Apple Silicon machines only (`requirements-segment.txt` is kept separate).
+
+## 2026-09-26 — Round 3 results, part 1: background removal works; a jury reaches ~0.90 val
+
+Runs:
+- M4 Air: IS-Net masks for all 24,997 images, plus the four mask levels.
+- Intel MBP: sharpening + resolution levels (sharpening ran at all sizes because `TRAIN_SIZES` was missing on the first run).
+
+All numbers are pca_svm_c3 / hog2_slbp unless noted.
+
+**Segmentation levels vs. the reference (P3_square_flip):**
+
+| level | 1k | 5k | 5k + flip TTA | McNemar p vs ref @5k (TTA) |
+|---|---|---|---|---|
+| P3_square_flip (reference) | 0.792 | 0.843 | 0.846 | — |
+| P5_maskcrop_flip (zoom to mask, cleaned) | 0.783 | 0.849 | 0.848 | 0.92 |
+| P5_maskcrop_raw_flip (zoom, raw mask) | 0.780 | 0.853 | 0.851 | 0.66 |
+| **P6_maskcrop_bggray_flip (zoom + gray background)** | **0.816** | **0.864** | **0.873** | **0.048** |
+| P7_maskcrop_bgblur_flip (zoom + blurred background) | 0.797 | 0.860 | 0.856 | 0.41 |
+
+- **Removing the background is what helps; zooming alone doesn't.**
+  - P5 (crop only) is within noise of the reference.
+  - Flattening the background to gray (P6) gives +2.1 points (+2.7 with TTA, p=0.048). It's the first statistically significant gain in round 3.
+  - Blurring the background (P7) lands in between. Some background texture survives the blur.
+- **Where the gain comes from:** cat recall rises 0.808 → 0.864, while dog recall stays about flat (0.878 → 0.864). The reference was misreading cats from background context.
+- **Mask post-processing (cleaned vs. raw) makes no measurable difference** (0.849 vs. 0.853, noise). IS-Net masks are already clean enough.
+
+**Deblurring and resolution (Intel MBP):**
+
+| level | 1k | 5k | 10k | max |
+|---|---|---|---|---|
+| P3_square_flip (reference) | 0.792 | 0.843 | 0.845 | 0.860 |
+| + unsharp masking | 0.801 | 0.842 | 0.856 | 0.866 |
+| + Richardson–Lucy | 0.791 | 0.838 | 0.845 | 0.849 |
+| 192 px | 0.808 | 0.848 | | |
+| 256 px, 16-px cells | 0.811 | 0.843 | | |
+
+- Sharpening and resolution changes are all within noise at 5k.
+- Higher resolution helps at 1k (+1.6 to +1.9), but that fades with more data.
+- Richardson–Lucy slightly hurts.
+- Consistent with the blur diagnostic: images at the working resolution are mostly sharp already.
+
+**Jury (evidence pooling), first look** (scratch pool over the 31 saved score files so far):
+
+| rule | K | TTA | val | vs. best single | McNemar p |
+|---|---|---|---|---|---|
+| soft | 3 | yes | **0.896** | +2.3 | 0.030 |
+| soft | 3 | no | 0.894 | +2.8 | 0.0006 |
+| weighted | 3 | yes | 0.893 | +2.0 | 0.070 |
+| majority | 3 | yes | 0.892 | +1.9 | 0.084 |
+
+- Best jury = P6_maskcrop_bggray_flip/pca_svm_c3/5k + P3_square_flip/lightgbm/5k + P3_square_flip_unsharp/pca_svm_c3/max, soft vote with flip TTA.
+- The jury works because the members make *different* mistakes: P6 and the reference disagree on 175 of 1,000 val images.
+- Caveats:
+  - The jury was chosen on val, so 0.896 is optimistic. The one-time test run is the honest number.
+  - The LightGBM member's scores come from the smoke test. The Intel MBP's jury run will reproduce it properly.
+
+**Other:**
+- The Intel MBP couldn't run LightGBM/XGBoost (its install is missing or broken). The code used to hide this as "unknown classifier"; it now reports the real import error.
+- A crash from a half-written cache file (interrupted save) is fixed: cache writes are now atomic, and incomplete files are recomputed.
