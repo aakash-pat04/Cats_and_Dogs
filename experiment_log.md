@@ -533,3 +533,48 @@ All numbers are pca_svm_c3 / hog2_slbp unless noted.
 **Other:**
 - The Intel MBP couldn't run LightGBM/XGBoost (its install is missing or broken). The code used to hide this as "unknown classifier"; it now reports the real import error.
 - A crash from a half-written cache file (interrupted save) is fixed: cache writes are now atomic, and incomplete files are recomputed.
+
+## 2026-09-26 (later) — Round 3 results, part 2: P6 at max, jury members, honest jury estimate
+
+**New single-model best: P6_maskcrop_bggray_flip / hog2_slbp / pca_svm_c3 / max = 0.885 val** (P3_square_flip at max was 0.860, so gray background is +2.5 at full size).
+
+**Shape / foreground-texture features on P6** (pca_svm_c3):
+
+| feature level | 1k | 5k | 5k + TTA |
+|---|---|---|---|
+| hog2_slbp | 0.816 | 0.864 | 0.873 |
+| hog2_slbp_shape (+ silhouette) | 0.811 | 0.866 | 0.876 |
+| hog2_slbpfg_shape (+ silhouette, foreground-only LBP) | 0.817 | 0.862 | 0.859 |
+
+These are all within noise, so no clear gain. Once the background is gray, HOG already sees the silhouette's edges.
+
+**Tree models at 5k:**
+
+| level / features | LightGBM | XGBoost | HGB | RF (capped) |
+|---|---|---|---|---|
+| P3_square_flip / hog2_slbp (Intel) | 0.837 | 0.838 | 0.844 | 0.753 |
+| P3_square_flip / hog2_slbp_color (Intel) | 0.847 | 0.849 | 0.857 | 0.747 |
+| P6_maskcrop_bggray_flip / hog2_slbp (Air) | 0.865 | 0.862 | 0.855 | — |
+
+- Boosted trees are now within ~0.5 points of the SVM, and they make different mistakes.
+- Color helps the trees by ~+1 point, unlike the SVM (+0.1).
+- Cross-machine note: LightGBM on P3_square_flip/hog2_slbp/5k gave 0.837 on the Intel MBP vs 0.841 in the M4 smoke test. Tree models aren't bit-identical across CPU architectures; the SVMs were.
+
+**Jury over all 45 saved score files (sizes ≥ 5k):**
+- Best raw: weighted vote, K=7, no TTA = **0.909** (McNemar p=0.003 vs the best single model, 0.885).
+- Many other configurations land at 0.900–0.906.
+
+**How much of that is selection optimism?** Honest check: 40 random half/half splits of val. Pick the jury (and the best single model) on one half, score on the other.
+
+| procedure | held-out accuracy | gain over best single (held-out) |
+|---|---|---|
+| best single model | 0.879 | — |
+| soft, K=3 | 0.891 | +1.1 |
+| soft, K=5, TTA | 0.893 | +1.4 |
+| weighted, K=5 | 0.892 | +1.3 |
+| weighted, K=7 | 0.894 | +1.4 |
+| majority, K=3, TTA | 0.886 | +0.7 |
+
+So a realistic expectation for the test set is **~89% for the jury vs. ~88% for the best single model**. The jury gain is real (+1.1 to +1.4 held-out), but smaller than the raw val numbers suggest (+2.4). Soft/weighted votes beat plain majority.
+
+**Intel MBP issue:** LightGBM/XGBoost failed there because its repo's `.venv` pointed at another venv (moved folder). Fixed with a fresh venv. Its SVM `--backfill-scores` run exited without producing rows (cause unknown). That doesn't matter anymore: P3_square_flip SVM members at 5k are superseded by max-size members.
